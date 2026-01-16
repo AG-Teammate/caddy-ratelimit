@@ -3,8 +3,6 @@ Caddy HTTP Rate Limit Module
 
 This module implements both internal and distributed HTTP rate limiting. Requests can be rejected after a specified rate limit is hit.
 
-**WORK IN PROGRESS:** Please note that this module is still unfinished and may have bugs. Please try it out and file bug reports - thanks!
-
 > [!NOTE]
 > This is not an official repository of the [Caddy Web Server](https://github.com/caddyserver) organization.
 
