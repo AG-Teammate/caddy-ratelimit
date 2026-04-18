@@ -36,6 +36,30 @@ func init() {
 	caddy.RegisterModule(Handler{})
 }
 
+var tarpitSlots = make(chan struct{}, 10000)
+
+const (
+	tarpitMaxDuration   = 30 * time.Minute
+	headerByteDelayMin  = 50 * time.Millisecond
+	headerByteDelayMax  = 250 * time.Millisecond
+	bodyByteIntervalMin = 5 * time.Second
+	bodyByteIntervalMax = 30 * time.Second
+)
+
+// Helper function for randomized delays (compatible with Go 1.21 math/rand)
+func jitterWait(ctx context.Context, min, max time.Duration) bool {
+	// using weakrand (math/rand) is perfectly fine for tarpit timing
+	d := min + time.Duration(weakrand.Int63n(int64(max-min)))
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Handler implements rate limiting functionality.
 //
 // If a rate limit is exceeded, an HTTP error with status 429 will be
@@ -244,36 +268,87 @@ func (h *Handler) rateLimitExceeded(w http.ResponseWriter, r *http.Request, repl
 
 	// --- NEW TARPIT LOGIC ---
 	if h.Tarpit {
-		// Send 200 OK headers to trick the scanner into thinking the request
-		// succeeded and keeping it engaged
+		// Acquire a slot or fall back to plain 429
+		select {
+		case tarpitSlots <- struct{}{}:
+			defer func() { <-tarpitSlots }()
+		default:
+			// Tarpit is full, fallback to standard 429 rate limit
+			return caddyhttp.Error(http.StatusTooManyRequests, nil)
+		}
+
+		// HEAD requests: don't bother, they won't read the body anyway
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return nil
+		}
+
+		deadline := time.Now().Add(tarpitMaxDuration)
+		ctx, cancel := context.WithDeadline(r.Context(), deadline)
+		defer cancel()
+
+		// Attempt to Hijack the connection (Works for HTTP/1.1)
+		hijacker, isHijackable := w.(http.Hijacker)
+		if isHijackable {
+			conn, _, err := hijacker.Hijack()
+			if err == nil {
+				defer conn.Close()
+				_ = conn.SetDeadline(deadline)
+
+				response := "HTTP/1.1 200 OK\r\n" +
+					"Server: nginx\r\n" +
+					"Content-Type: text/plain; charset=utf-8\r\n" +
+					"X-Content-Type-Options: nosniff\r\n" +
+					"Cache-Control: no-store\r\n" +
+					"Content-Length: 1099511627776\r\n" +
+					"Connection: keep-alive\r\n" +
+					"\r\n"
+
+				// Drip headers byte-by-byte
+				for i := 0; i < len(response); i++ {
+					if _, err := conn.Write([]byte{response[i]}); err != nil {
+						return nil
+					}
+					if !jitterWait(ctx, headerByteDelayMin, headerByteDelayMax) {
+						return nil
+					}
+				}
+
+				// Drip body indefinitely
+				for {
+					if _, err := conn.Write([]byte{0x00}); err != nil {
+						return nil
+					}
+					if !jitterWait(ctx, bodyByteIntervalMin, bodyByteIntervalMax) {
+						return nil
+					}
+				}
+			}
+		}
+
+		// FALLBACK: If HTTP/2 or HTTP/3, Hijack fails. Use HTTP Flusher instead.
+		w.Header().Set("Server", "nginx")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Length", "1099511627776") // The 1 TiB Lie
 		w.WriteHeader(http.StatusOK)
 
 		flusher, canFlush := w.(http.Flusher)
 		if canFlush {
-			flusher.Flush() // Flush headers to the client immediately
+			flusher.Flush()
 		}
 
-		// Send 1 null byte every 5 seconds indefinitely
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
+		// Drip body indefinitely via Flusher
 		for {
-			select {
-			case <-r.Context().Done():
-				// Client finally gave up and closed the connection
+			if _, err := w.Write([]byte{0x00}); err != nil {
 				return nil
-			case <-ticker.C:
-				// Write a single null byte to keep the connection alive
-				if _, err := w.Write([]byte("\x00")); err != nil {
-					// Writing failed (e.g. broken pipe/disconnect), exit the loop
-					return nil
-				}
-				if canFlush {
-					flusher.Flush()
-				}
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+			if !jitterWait(ctx, bodyByteIntervalMin, bodyByteIntervalMax) {
+				return nil
 			}
 		}
 	}
