@@ -41,7 +41,7 @@ var tarpitSlots = make(chan struct{}, 10000)
 const (
 	tarpitMaxDuration   = 30 * time.Minute
 	headerByteDelayMin  = 50 * time.Millisecond
-	headerByteDelayMax  = 250 * time.Millisecond
+	headerByteDelayMax  = 1000 * time.Millisecond
 	bodyByteIntervalMin = 5 * time.Second
 	bodyByteIntervalMax = 30 * time.Second
 )
@@ -314,11 +314,18 @@ func (h *Handler) rateLimitExceeded(w http.ResponseWriter, r *http.Request, repl
 					}
 				}
 
-				// Drip body indefinitely
+				// Drip "f" and "u" indefinitely
+				isF := true
 				for {
-					if _, err := conn.Write([]byte{0x00}); err != nil {
+					char := byte('f')
+					if !isF {
+						char = byte('u')
+					}
+					if _, err := conn.Write([]byte{char}); err != nil {
 						return nil
 					}
+					isF = !isF
+
 					if !jitterWait(ctx, bodyByteIntervalMin, bodyByteIntervalMax) {
 						return nil
 					}
