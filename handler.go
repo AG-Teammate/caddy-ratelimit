@@ -70,6 +70,10 @@ type Handler struct {
 	// Defaults to `false` because keys can contain sensitive information.
 	LogKey bool `json:"log_key,omitempty"`
 
+	// Tarpit enables holding the connection open and slowly writing bytes
+	// to slow down automated scanners instead of sending a 429 response.
+	Tarpit bool `json:"tarpit,omitempty"`
+
 	rateLimits []*RateLimit
 	storage    certmagic.Storage
 	random     *weakrand.Rand
@@ -238,6 +242,43 @@ func (h *Handler) rateLimitExceeded(w http.ResponseWriter, r *http.Request, repl
 	// make some information about this rate limit available
 	repl.Set("http.rate_limit.exceeded.name", zoneName)
 
+	// --- NEW TARPIT LOGIC ---
+	if h.Tarpit {
+		// Send 200 OK headers to trick the scanner into thinking the request
+		// succeeded and keeping it engaged
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, canFlush := w.(http.Flusher)
+		if canFlush {
+			flusher.Flush() // Flush headers to the client immediately
+		}
+
+		// Send 1 null byte every 5 seconds indefinitely
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				// Client finally gave up and closed the connection
+				return nil
+			case <-ticker.C:
+				// Write a single null byte to keep the connection alive
+				if _, err := w.Write([]byte("\x00")); err != nil {
+					// Writing failed (e.g. broken pipe/disconnect), exit the loop
+					return nil
+				}
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+		}
+	}
+
+	// Normal behavior: return standard 429 Error if Tarpit is disabled
 	return caddyhttp.Error(http.StatusTooManyRequests, nil)
 }
 

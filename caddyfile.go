@@ -185,6 +185,12 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				h.LogKey = true
 
+			case "tarpit":
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+				h.Tarpit = true
+
 			case "storage":
 				if !d.NextArg() {
 					return d.ArgErr()
