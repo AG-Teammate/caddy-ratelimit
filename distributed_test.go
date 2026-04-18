@@ -104,7 +104,7 @@ func TestDistributed(t *testing.T) {
 			simulatedPeer := newRingBufferRateLimiter(maxEvents, parsedDuration)
 
 			for i := 0; i < testCase.peerRequests; i++ {
-				if when := simulatedPeer.When(); when != 0 {
+				if when := simulatedPeer.When(false); when != 0 { // <-- Added 'false' here
 					t.Fatalf("event should be allowed")
 				}
 			}

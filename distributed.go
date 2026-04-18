@@ -220,15 +220,29 @@ func (h Handler) distributedRateLimiting(w http.ResponseWriter, r *http.Request,
 	if oldestLocalEvent.Before(oldestEvent) && oldestLocalEvent.After(now().Add(-window)) {
 		oldestEvent = oldestLocalEvent
 	}
+
+	// Calculate multiplied window for distributed return
+	multiplier := 1
+	if h.Backoff && limiter.strikes > 0 {
+		multiplier = limiter.strikes + 1
+		if multiplier > 60 {
+			multiplier = 60
+		}
+	}
+	effectiveWindow := window * time.Duration(multiplier)
+
 	if totalCount < maxAllowed {
 		limiter.reserve()
+		limiter.strikes = 0 // Reset!
 		limiter.mu.Unlock()
 		return nil
 	}
+
+	limiter.strikes++ // Penalize!
 	limiter.mu.Unlock()
 
 	// otherwise, it appears limit has been exceeded
-	return h.rateLimitExceeded(w, r, repl, zoneName, rlKey, oldestEvent.Add(window).Sub(now()))
+	return h.rateLimitExceeded(w, r, repl, zoneName, rlKey, oldestEvent.Add(effectiveWindow).Sub(now()))
 }
 
 type rlStateValue struct {

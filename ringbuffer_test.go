@@ -38,7 +38,7 @@ func TestCount(t *testing.T) {
 	// Fill the buffer with events spaced out by 1s
 	for i := 0; i < bufSize; i++ {
 		advanceTime(i)
-		if when := rb.When(); when != 0 {
+		if when := rb.When(false); when != 0 { // <-- Added 'false' here
 			t.Fatalf("empty ring buffer should allow events")
 		}
 
@@ -51,7 +51,7 @@ func TestCount(t *testing.T) {
 		}
 	}
 
-	if when := rb.When(); when != time.Second {
+	if when := rb.When(false); when != time.Second { // <-- Added 'false' here
 		t.Fatal("full ring buffer should forbid events")
 	}
 

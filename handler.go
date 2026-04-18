@@ -22,7 +22,6 @@ import (
 	"net"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -97,6 +96,12 @@ type Handler struct {
 	// Tarpit enables holding the connection open and slowly writing bytes
 	// to slow down automated scanners instead of sending a 429 response.
 	Tarpit bool `json:"tarpit,omitempty"`
+
+	// Silent disables the "rate limit exceeded" logging to save CPU/Disk I/O
+	Silent bool `json:"silent,omitempty"`
+
+	// Backoff exponentially multiplies the penalty window for aggressive clients.
+	Backoff bool `json:"backoff,omitempty"`
 
 	rateLimits []*RateLimit
 	storage    certmagic.Storage
@@ -211,7 +216,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 
 		if h.Distributed == nil {
 			// internal rate limiter only
-			if dur := limiter.When(); dur > 0 {
+			if dur := limiter.When(h.Backoff); dur > 0 {
 				return h.rateLimitExceeded(w, r, repl, rl.zoneName, key, dur)
 			}
 		} else {
@@ -233,38 +238,35 @@ func (h *Handler) rateLimitExceeded(w http.ResponseWriter, r *http.Request, repl
 	}
 
 	// add 0.5 to ceil() instead of round() which FormatFloat() does automatically
-	w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
-
-	// emit log about exceeding rate limit (see #37)
-	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteIP = r.RemoteAddr // assume there was no port, I guess
-	}
-
-	// Create logger with common fields
-	logger := h.logger.With(
-		zap.String("zone", zoneName),
-		zap.Duration("wait", wait),
-		zap.String("remote_ip", remoteIP),
-	)
-
-	// Conditionally add the key field
-	if h.LogKey {
-		logger = logger.With(zap.String("key", key))
-	}
-
-	// Log the rate limit exceeded message
-	logger.Info("rate limit exceeded")
-
-	// also emit event so user can configure custom responses to rate limit violations
-	h.events.Emit(h.ctx, "rate_limit_exceeded", map[string]any{
-		"zone":      zoneName,
-		"wait":      wait,
-		"remote_ip": remoteIP,
-	})
+	//w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
 
 	// make some information about this rate limit available
 	repl.Set("http.rate_limit.exceeded.name", zoneName)
+
+	if !h.Silent {
+		// emit log about exceeding rate limit
+		remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			remoteIP = r.RemoteAddr // assume there was no port, I guess
+		}
+
+		logger := h.logger.With(
+			zap.String("zone", zoneName),
+			zap.Duration("wait", wait),
+			zap.String("remote_ip", remoteIP),
+		)
+		if h.LogKey {
+			logger = logger.With(zap.String("key", key))
+		}
+		logger.Info("rate limit exceeded")
+
+		// also emit event
+		h.events.Emit(h.ctx, "rate_limit_exceeded", map[string]any{
+			"zone":      zoneName,
+			"wait":      wait,
+			"remote_ip": remoteIP,
+		})
+	}
 
 	// --- NEW TARPIT LOGIC ---
 	if h.Tarpit {

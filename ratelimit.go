@@ -141,11 +141,19 @@ func (rlm *rateLimitersMap) sweep() {
 				cursorNewest = len(rl.ring) - 1
 			}
 			newest := rl.ring[cursorNewest]
-			window := rl.window
 
-			// if newest event in memory is outside the window,
+			effectiveWindow := rl.window
+			if rl.strikes > 0 {
+				multiplier := rl.strikes + 1
+				if multiplier > 60 {
+					multiplier = 60
+				}
+				effectiveWindow = rl.window * time.Duration(multiplier)
+			}
+
+			// if newest event in memory is outside the penalized window,
 			// the entire ring has expired and can be forgotten
-			if newest.Add(window).Before(now()) {
+			if newest.Add(effectiveWindow).Before(now()) {
 				delete(rlm.limiters, key)
 			}
 		}(rl)

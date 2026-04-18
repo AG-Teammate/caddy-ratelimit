@@ -24,10 +24,11 @@ import (
 // sliding window of a given duration. An empty value is
 // not valid; always call initialize() before using.
 type ringBufferRateLimiter struct {
-	mu     sync.Mutex
-	window time.Duration
-	ring   []time.Time // len(ring) == maxEvents
-	cursor int         // always points to the oldest timestamp
+	mu      sync.Mutex
+	window  time.Duration
+	ring    []time.Time // len(ring) == maxEvents
+	cursor  int         // always points to the oldest timestamp
+	strikes int         // Tracks consecutive blocked requests
 }
 
 // newRingBufferRateLimiter sets up a new rate limiter, allowing maxEvents
@@ -49,25 +50,45 @@ func newRingBufferRateLimiter(maxEvents int, window time.Duration) *ringBufferRa
 
 // When returns the duration before the next allowable event; it does not block.
 // If zero, the event is allowed and a reservation is immediately made.
-// If non-zero, the event is NOT allowed and a reservation is not made.
-func (r *ringBufferRateLimiter) When() time.Duration {
+func (r *ringBufferRateLimiter) When(backoff bool) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.allowed() {
+
+	effectiveWindow := r.window
+	if backoff && r.strikes > 0 {
+		multiplier := r.strikes + 1
+		if multiplier > 60 { // Max 60x cap
+			multiplier = 60
+		}
+		effectiveWindow = r.window * time.Duration(multiplier)
+	}
+
+	if r.allowed(effectiveWindow) {
+		r.strikes = 0 // Reset strikes on success
 		return 0
 	}
-	return r.ring[r.cursor].Add(r.window).Sub(now())
+
+	r.strikes++ // Penalize for hammering
+
+	// Recalculate effective window since strikes just increased
+	if backoff {
+		multiplier := r.strikes + 1
+		if multiplier > 60 {
+			multiplier = 60
+		}
+		effectiveWindow = r.window * time.Duration(multiplier)
+	}
+
+	return r.ring[r.cursor].Add(effectiveWindow).Sub(now())
 }
 
 // allowed returns true if the event is allowed to happen right now.
-// It does not wait. If the event is allowed, a reservation is made.
-// It is NOT safe for concurrent use, so it must be called inside a
-// lock on r.mu.
-func (r *ringBufferRateLimiter) allowed() bool {
+// It is NOT safe for concurrent use, so it must be called inside a lock on r.mu.
+func (r *ringBufferRateLimiter) allowed(effectiveWindow time.Duration) bool {
 	if len(r.ring) == 0 {
 		return false
 	}
-	if now().Sub(r.ring[r.cursor]) > r.window {
+	if now().Sub(r.ring[r.cursor]) > effectiveWindow {
 		r.reserve()
 		return true
 	}

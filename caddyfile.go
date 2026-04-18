@@ -191,6 +191,18 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				h.Tarpit = true
 
+			case "silent":
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+				h.Silent = true
+
+			case "backoff":
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+				h.Backoff = true
+
 			case "storage":
 				if !d.NextArg() {
 					return d.ArgErr()
